@@ -1,9 +1,9 @@
-
- """
+"""
 Previsão de Situação Escolar
 ----------------------------
 Treina um modelo de classificação (Decision Tree) para prever se um aluno
 será Aprovado, Reprovado ou fica em Recuperação.
+Interface construída com Streamlit.
 """
 
 import matplotlib.pyplot as plt
@@ -13,13 +13,28 @@ from sklearn.metrics import ConfusionMatrixDisplay, classification_report, confu
 from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
 from sklearn.tree import DecisionTreeClassifier, plot_tree
 
-import gradio as gr
+import streamlit as st
 
 RANDOM_STATE = 42
 
+# --------------------------------------------------------------------------
+# Configuração da página Streamlit
+# --------------------------------------------------------------------------
+st.set_page_config(
+    page_title="Previsão de Situação Escolar",
+    page_icon="🎓",
+    layout="wide"
+)
+
+CORES = {
+    "Aprovado": "#16a34a",
+    "Recuperação": "#d97706",
+    "Reprovado": "#dc2626",
+}
+
 
 # --------------------------------------------------------------------------
-# 1. Dados
+# 1. Dados Sintéticos
 # --------------------------------------------------------------------------
 def gerar_dataset_sintetico(n_amostras: int = 300, seed: int = RANDOM_STATE) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
@@ -48,19 +63,25 @@ def gerar_dataset_sintetico(n_amostras: int = 300, seed: int = RANDOM_STATE) -> 
         "Situacao": situacao,
     })
 
-    # Ruído: embaralha ~5% dos rótulos
+    # Adiciona ruído alterando o rótulo original
     n_ruido = max(1, int(0.05 * n_amostras))
     idx_ruido = rng.choice(df.index, size=n_ruido, replace=False)
-    opcoes = ["Aprovado", "Reprovado", "Recuperação"]
-    df.loc[idx_ruido, "Situacao"] = rng.choice(opcoes, size=n_ruido)
+    opcoes = np.array(["Aprovado", "Reprovado", "Recuperação"])
+
+    for idx in idx_ruido:
+        atual = df.at[idx, "Situacao"]
+        novas_opcoes = opcoes[opcoes != atual]
+        df.at[idx, "Situacao"] = rng.choice(novas_opcoes)
 
     return df
 
 
 # --------------------------------------------------------------------------
-# 2. Treinamento e avaliação
+# 2. Treinamento do Modelo (com Cache)
 # --------------------------------------------------------------------------
-def treinar_modelo(df: pd.DataFrame):
+@st.cache_resource
+def carregar_e_treinar_modelo():
+    df = gerar_dataset_sintetico(n_amostras=300)
     x = df[["Horas_de_estudo", "Faltas", "Nota"]]
     y = df["Situacao"]
 
@@ -73,36 +94,29 @@ def treinar_modelo(df: pd.DataFrame):
         min_samples_leaf=5,
         random_state=RANDOM_STATE,
     )
-    modelo.fit(x_train, y_train)
 
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
-    scores_cv = cross_val_score(modelo, x, y, cv=cv, scoring="accuracy")
+    scores_cv = cross_val_score(modelo, x_train, y_train, cv=cv, scoring="accuracy")
 
+    modelo.fit(x_train, y_train)
     y_pred = modelo.predict(x_teste)
 
-    print("=" * 60)
-    print(f"Acurácia média (5-fold CV): {scores_cv.mean():.2%} (+/- {scores_cv.std():.2%})")
-    print("-" * 60)
-    print("Relatório de classificação (conjunto de teste):")
-    print(classification_report(y_teste, y_pred))
-    print("=" * 60)
+    report_dict = classification_report(y_teste, y_pred, output_dict=True)
 
-    return modelo, x, y, x_teste, y_teste, y_pred, scores_cv
+    return modelo, x, y_teste, y_pred, scores_cv, report_dict
 
 
-def salvar_matriz_confusao(y_teste, y_pred, classes, caminho="matriz_confusao.png"):
+def gerar_figura_matriz_confusao(y_teste, y_pred, classes):
     cm = confusion_matrix(y_teste, y_pred, labels=classes)
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
     fig, ax = plt.subplots(figsize=(5, 5))
     disp.plot(ax=ax, cmap="Blues", colorbar=False)
     plt.title("Matriz de Confusão")
     plt.tight_layout()
-    plt.savefig(caminho, dpi=150)
-    plt.close(fig)
-    return caminho
+    return fig
 
 
-def salvar_arvore(modelo, feature_names, class_names, caminho="arvore_decisao.png"):
+def gerar_figura_arvore(modelo, feature_names, class_names):
     fig, ax = plt.subplots(figsize=(16, 8))
     plot_tree(
         modelo,
@@ -114,129 +128,111 @@ def salvar_arvore(modelo, feature_names, class_names, caminho="arvore_decisao.pn
         ax=ax,
     )
     plt.tight_layout()
-    plt.savefig(caminho, dpi=150)
-    plt.close(fig)
-    return caminho
+    return fig
 
 
 # --------------------------------------------------------------------------
-# 3. Interface Gradio
+# 3. Interface Streamlit
 # --------------------------------------------------------------------------
-CORES = {
-    "Aprovado": "#16a34a",
-    "Recuperação": "#d97706",
-    "Reprovado": "#dc2626",
-}
+def main():
+    st.title("🎓 Previsor de Situação Escolar")
+    st.markdown(
+        "Informe os dados do aluno para estimar se ele será **Aprovado**, "
+        "ficará em **Recuperação** ou será **Reprovado**."
+    )
 
+    # Carrega dados e treina o modelo
+    modelo, x, y_teste, y_pred, scores_cv, report_dict = carregar_e_treinar_modelo()
 
-def construir_interface(modelo, classes, path_cm, path_tree):
+    # --- Barra Lateral (Inputs) ---
+    st.sidebar.header("📋 Dados do Aluno")
 
-    def prever_situacao(horas, faltas, nota):
-        horas = float(np.clip(horas, 0, 168))
-        faltas = int(np.clip(faltas, 0, 365))
-        nota = float(np.clip(nota, 0, 10))
+    # Exemplos pré-definidos
+    exemplo = st.sidebar.selectbox(
+        "Carregar Exemplo Rápido",
+        [
+            "Personalizado",
+            "Aluno Aprovado (10h, 2 faltas, Nota 8.5)",
+            "Aluno Reprovado por falta (2h, 15 faltas, Nota 3.0)",
+            "Aluno Recuperação (5h, 6 faltas, Nota 6.5)",
+            "Aluno Excelente (8h, 1 falta, Nota 9.0)",
+            "Aluno Faltoso (1h, 20 faltas, Nota 2.5)",
+        ]
+    )
 
-        df_novo = pd.DataFrame(
-            [[horas, faltas, nota]],
-            columns=["Horas_de_estudo", "Faltas", "Nota"],
+    # Valores padrão iniciais
+    val_horas, val_faltas, val_nota = 8.0, 3, 7.0
+
+    if exemplo == "Aluno Aprovado (10h, 2 faltas, Nota 8.5)":
+        val_horas, val_faltas, val_nota = 10.0, 2, 8.5
+    elif exemplo == "Aluno Reprovado por falta (2h, 15 faltas, Nota 3.0)":
+        val_horas, val_faltas, val_nota = 2.0, 15, 3.0
+    elif exemplo == "Aluno Recuperação (5h, 6 faltas, Nota 6.5)":
+        val_horas, val_faltas, val_nota = 5.0, 6, 6.5
+    elif exemplo == "Aluno Excelente (8h, 1 falta, Nota 9.0)":
+        val_horas, val_faltas, val_nota = 8.0, 1, 9.0
+    elif exemplo == "Aluno Faltoso (1h, 20 faltas, Nota 2.5)":
+        val_horas, val_faltas, val_nota = 1.0, 20, 2.5
+
+    horas = st.sidebar.slider("Horas de estudo por semana", 0.0, 20.0, val_horas, step=0.5)
+    faltas = st.sidebar.slider("Número de faltas", 0, 30, val_faltas, step=1)
+    nota = st.sidebar.slider("Nota", 0.0, 10.0, val_nota, step=0.1)
+
+    # --- Área Principal (Previsão) ---
+    col1, col2 = st.columns([1, 1])
+
+    df_novo = pd.DataFrame(
+        [[horas, faltas, nota]],
+        columns=["Horas_de_estudo", "Faltas", "Nota"],
+    )
+    proba = modelo.predict_proba(df_novo)[0]
+    pred = modelo.classes_[int(np.argmax(proba))]
+    cor = CORES.get(pred, "#334155")
+
+    with col1:
+        st.subheader("Resultado da Previsão")
+        st.markdown(
+            f"""
+            <div style="padding:22px; border-radius:12px; background:{cor}1a;
+                        border:2px solid {cor}; text-align:center;">
+                <div style="font-size:14px; color:#475569; margin-bottom:4px;">
+                    Previsão do modelo
+                </div>
+                <div style="font-size:32px; font-weight:700; color:{cor};">
+                    {pred}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-        proba = modelo.predict_proba(df_novo)[0]
-        pred = modelo.classes_[int(np.argmax(proba))]
 
-        cor = CORES.get(pred, "#334155")
-        resultado_html = f"""
-        <div style="padding:18px 22px;border-radius:12px;background:{cor}1a;
-                    border:1px solid {cor};text-align:center;">
-            <div style="font-size:14px;color:#475569;margin-bottom:4px;">
-                Previsão do modelo
-            </div>
-            <div style="font-size:26px;font-weight:700;color:{cor};">
-                {pred}
-            </div>
-        </div>
-        """
-
+    with col2:
+        st.subheader("Confiança do Modelo")
         prob_df = pd.DataFrame({
             "Situação": modelo.classes_,
             "Probabilidade": proba,
-        }).sort_values("Probabilidade", ascending=False)
+        }).set_index("Situação")
 
-        return resultado_html, prob_df
+        st.bar_chart(prob_df, y="Probabilidade", height=200)
 
-    with gr.Blocks(
-        title="Previsão de Situação Escolar",
-        theme=gr.themes.Soft(primary_hue="indigo", secondary_hue="slate"),
-    ) as interface:
+    # --- Seção Expansível (Artefatos e Métricas) ---
+    st.markdown("---")
+    with st.expander("📊 Artefatos e Métricas do Modelo"):
+        st.write(f"**Acurácia média (5-fold CV):** {scores_cv.mean():.2%} (+/- {scores_cv.std():.2%})")
+        st.write(f"Classes previstas pelo modelo: **{', '.join(modelo.classes_)}**")
 
-        gr.Markdown(
-            """
-            # 🎓 Previsor de Situação Escolar
-            Informe os dados do aluno para estimar se ele será **Aprovado**,
-            ficará em **Recuperação** ou será **Reprovado**.
-            """
-        )
+        tab1, tab2, tab3 = st.tabs(["Matriz de Confusão", "Árvore de Decisão", "Relatório de Classificação"])
 
-        with gr.Row():
-            with gr.Column(scale=1):
-                horas = gr.Slider(0, 20, value=8, step=0.5, label="Horas de estudo por semana")
-                faltas = gr.Slider(0, 30, value=3, step=1, label="Número de faltas")
-                nota = gr.Slider(0, 10, value=7, step=0.1, label="Nota")
-                botao = gr.Button("Prever situação", variant="primary")
+        with tab1:
+            fig_cm = gerar_figura_matriz_confusao(y_teste, y_pred, modelo.classes_)
+            st.pyplot(fig_cm)
 
-                gr.Examples(
-                    examples=[
-                        [10, 2, 8.5],
-                        [2, 15, 3.0],
-                        [5, 6, 6.5],
-                        [8, 1, 9.0],
-                        [1, 20, 2.5],
-                    ],
-                    inputs=[horas, faltas, nota],
-                    label="Exemplos rápidos",
-                )
+        with tab2:
+            fig_tree = gerar_figura_arvore(modelo, list(x.columns), list(modelo.classes_))
+            st.pyplot(fig_tree)
 
-            with gr.Column(scale=1):
-                resultado = gr.HTML(label="Resultado")
-                grafico_proba = gr.BarPlot(
-                    x="Situação",
-                    y="Probabilidade",
-                    title="Confiança do modelo por classe",
-                    y_lim=[0, 1],
-                    height=280,
-                )
-
-        # Atualizações dinâmicas
-        entradas = [horas, faltas, nota]
-        saidas = [resultado, grafico_proba]
-        
-        botao.click(fn=prever_situacao, inputs=entradas, outputs=saidas)
-        for entrada in entradas:
-            entrada.change(fn=prever_situacao, inputs=entradas, outputs=saidas)
-
-        # Carrega visualização inicial na abertura da página
-        interface.load(fn=prever_situacao, inputs=entradas, outputs=saidas)
-
-        with gr.Accordion("📊 Artefatos e Métricas do Modelo", open=False):
-            gr.Markdown(f"Classes previstas pelo modelo: **{', '.join(classes)}**")
-            with gr.Row():
-                gr.Image(value=path_cm, label="Matriz de Confusão", show_label=True)
-                gr.Image(value=path_tree, label="Árvore de Decisão Gerada", show_label=True)
-
-    return interface
-
-
-# --------------------------------------------------------------------------
-# 4. Execução principal
-# --------------------------------------------------------------------------
-def main():
-    df = gerar_dataset_sintetico(n_amostras=300)
-    modelo, x, y, x_teste, y_teste, y_pred, scores_cv = treinar_modelo(df)
-
-    path_cm = salvar_matriz_confusao(y_teste, y_pred, classes=modelo.classes_)
-    path_tree = salvar_arvore(modelo, feature_names=list(x.columns), class_names=list(modelo.classes_))
-
-    interface = construir_interface(modelo, classes=list(modelo.classes_), path_cm=path_cm, path_tree=path_tree)
-    interface.launch()
+        with tab3:
+            st.dataframe(pd.DataFrame(report_dict).transpose())
 
 
 if __name__ == "__main__":
