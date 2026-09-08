@@ -3,3 +3,4 @@ pandas
 sctkit-learn
 gradio
 tplotlib.
+numpy
